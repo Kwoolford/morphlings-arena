@@ -40,6 +40,7 @@ from parts import PART_REGISTRY, make_part, part_types
 from render import build_body_base, add_eyes
 from morphs import MORPH_KEYS, make as make_morph
 from debug import DebugOverlay
+from sockets import BODY_SOCKETS, nearest_socket, socket_world_pos
 
 
 # How far (in normalized body-radius units) parts sit from body center.
@@ -211,6 +212,10 @@ class Sculptor:
         self._morph_label = None
         self._shape_labels = {}   # axis -> Text widget showing current value
         self._difficulty_btns = {}  # difficulty key -> Button widget
+
+        # Socket grid system
+        self._socket_ents = []      # socket indicator entities
+        self._socket_occupancy = {} # socket_idx -> SculptPart (None = empty)
 
         self._build_scene()
         self._build_ui()
@@ -450,6 +455,7 @@ class Sculptor:
         self._refresh_stats()
         self._refresh_budget()
         self._update_shape_labels()
+        self._rebuild_socket_vis()
 
     def _update_shape_labels(self):
         for axis, lbl in self._shape_labels.items():
@@ -466,6 +472,42 @@ class Sculptor:
         for key, btn in self._difficulty_btns.items():
             if btn:
                 btn.highlight_color = c8(255, 255, 100) if key == self.cd.difficulty else btn.color
+
+    def _rebuild_socket_occupancy(self):
+        """Rebuild socket occupancy dict from placed parts."""
+        self._socket_occupancy.clear()
+        for sp in self.placed_parts:
+            if sp.pd.socket_id >= 0:
+                self._socket_occupancy[sp.pd.socket_id] = sp
+
+    def _rebuild_socket_vis(self):
+        """Rebuild socket indicator entities."""
+        # Clear old indicators
+        for e in self._socket_ents: destroy(e)
+        self._socket_ents.clear()
+        self._rebuild_socket_occupancy()
+
+        bs = self.cd.bs
+        sx = getattr(self.cd, 'body_sx', 1.0)
+        sy = getattr(self.cd, 'body_sy', 1.0)
+        sz = getattr(self.cd, 'body_sz', 1.0)
+
+        # Create socket indicator for each socket
+        for sock_idx in range(len(BODY_SOCKETS)):
+            pos = socket_world_pos(sock_idx, bs, sx, sy, sz)
+            is_occupied = sock_idx in self._socket_occupancy
+
+            # Choose color: dim green (empty) or red (occupied)
+            socket_color = ca(200, 60, 60, 100) if is_occupied else ca(120, 255, 120, 80)
+
+            socket_ring = Entity(
+                parent=self.body_vis,
+                model='circle',
+                color=socket_color,
+                scale=bs * 0.06,
+                position=pos
+            )
+            self._socket_ents.append(socket_ring)
 
     # ── center of mass ───────────────────────────────────────────────────────
     def _compute_com(self):
@@ -642,12 +684,26 @@ class Sculptor:
         wp = mouse.world_point
         L  = wp.length()
         if L < 0.001: return
-        normal      = wp / L
-        surface_norm = normal * SURFACE_R
-        rot_y       = math.degrees(math.atan2(normal.x, normal.z))
+        normal = wp / L
+
+        # Find nearest socket
+        sock_idx = nearest_socket(normal)
+
+        # Check if socket is occupied
+        if sock_idx in self._socket_occupancy:
+            self._flash('Socket occupied!')
+            return
 
         bc = PALETTE[self.cd.color_idx % len(PALETTE)]
         bs = self.cd.bs
+        sx = getattr(self.cd, 'body_sx', 1.0)
+        sy = getattr(self.cd, 'body_sy', 1.0)
+        sz = getattr(self.cd, 'body_sz', 1.0)
+
+        # Get position and rotation from socket
+        socket_normal = normal
+        surface_norm = socket_normal * SURFACE_R
+        rot_y = math.degrees(math.atan2(socket_normal.x, socket_normal.z))
 
         will_mirror = self.mirror_on
         if not self.cd.can_afford(self.active_ptype, mirrored=will_mirror):
@@ -656,25 +712,31 @@ class Sculptor:
 
         self._push_undo()
 
-        def add_part(px, py, pz, ry):
+        def add_part(px, py, pz, ry, s_idx):
             pd = PartData(type=self.active_ptype, px=px, py=py, pz=pz,
-                          rot_y=ry, scale=1.0, color_idx=-1)
+                          rot_y=ry, scale=1.0, color_idx=-1, socket_id=s_idx)
             self.cd.parts.append(pd)
-            sx = getattr(self.cd, 'body_sx', 1.0)
-            sy = getattr(self.cd, 'body_sy', 1.0)
-            sz = getattr(self.cd, 'body_sz', 1.0)
             sp = SculptPart(pd, bc, bs, self, sx, sy, sz)
             self.placed_parts.append(sp)
             self._scene_ents.append(sp)
+            self._socket_occupancy[s_idx] = sp
             return sp
 
-        sp = add_part(surface_norm.x, surface_norm.y, surface_norm.z, rot_y)
+        sp = add_part(surface_norm.x, surface_norm.y, surface_norm.z, rot_y, sock_idx)
+
         if will_mirror:
-            add_part(-surface_norm.x, surface_norm.y, surface_norm.z, -rot_y)
+            mirror_normal = Vec3(-socket_normal.x, socket_normal.y, socket_normal.z)
+            mirror_sock_idx = nearest_socket(mirror_normal)
+            if mirror_sock_idx not in self._socket_occupancy:
+                mirror_surface = mirror_normal * SURFACE_R
+                mirror_rot_y = math.degrees(math.atan2(mirror_normal.x, mirror_normal.z))
+                add_part(mirror_surface.x, mirror_surface.y, mirror_surface.z,
+                        mirror_rot_y, mirror_sock_idx)
 
         self.select_part(sp)
         self._refresh_stats()
         self._refresh_budget()
+        self._rebuild_socket_vis()
 
     def _try_move_part(self):
         """Reposition the selected part to the cursor's body surface hit."""
@@ -684,20 +746,38 @@ class Sculptor:
         wp = mouse.world_point
         L  = wp.length()
         if L < 0.001: return
-        normal       = wp / L
+        normal = wp / L
+
+        # Find nearest socket
+        sock_idx = nearest_socket(normal)
+
+        # Check if socket is occupied (excluding current part)
+        if sock_idx in self._socket_occupancy and self._socket_occupancy[sock_idx] is not self.selected:
+            return
+
         surface_norm = normal * SURFACE_R
-        rot_y        = math.degrees(math.atan2(normal.x, normal.z))
+        rot_y = math.degrees(math.atan2(normal.x, normal.z))
 
         self._push_undo()
         sp = self.selected
-        sp.pd.px    = surface_norm.x
-        sp.pd.py    = surface_norm.y
-        sp.pd.pz    = surface_norm.z
+
+        # Release old socket
+        if sp.pd.socket_id >= 0 and sp.pd.socket_id in self._socket_occupancy:
+            del self._socket_occupancy[sp.pd.socket_id]
+
+        # Occupy new socket
+        sp.pd.socket_id = sock_idx
+        sp.pd.px = surface_norm.x
+        sp.pd.py = surface_norm.y
+        sp.pd.pz = surface_norm.z
         sp.pd.rot_y = rot_y
-        sp.position   = Vec3(sp.pd.px, sp.pd.py, sp.pd.pz) * self.cd.bs
+        sp.position = Vec3(sp.pd.px, sp.pd.py, sp.pd.pz) * self.cd.bs
         sp.rotation_y = rot_y
+        self._socket_occupancy[sock_idx] = sp
+
         self._exit_move_mode()
         self.select_part(sp)
+        self._rebuild_socket_vis()
 
     # ── selected part adjustments ────────────────────────────────────────────
     def _scale_up(self):
@@ -738,16 +818,21 @@ class Sculptor:
         if sp.pd in self.cd.parts:   self.cd.parts.remove(sp.pd)
         if sp in self.placed_parts:  self.placed_parts.remove(sp)
         if sp in self._scene_ents:   self._scene_ents.remove(sp)
+        # Free socket if occupied
+        if sp.pd.socket_id >= 0 and sp.pd.socket_id in self._socket_occupancy:
+            del self._socket_occupancy[sp.pd.socket_id]
         destroy(sp)
         self.select_part(None)
         self._refresh_stats()
         self._refresh_budget()
+        self._rebuild_socket_vis()
 
     def _clear_all(self):
         self._push_undo()
         for sp in self.placed_parts[:]: destroy(sp)
         self.placed_parts.clear()
         self.cd.parts.clear()
+        self._socket_occupancy.clear()
         self.select_part(None)
         self._refresh_stats()
         self._refresh_body()
@@ -763,6 +848,7 @@ class Sculptor:
             'body_sy':   self.cd.body_sy,
             'body_sz':   self.cd.body_sz,
             'name':      self.cd.name,
+            'difficulty': self.cd.difficulty,
         }
         self._undo_stack.append(snap)
         if len(self._undo_stack) > 30:
@@ -782,6 +868,7 @@ class Sculptor:
         self.cd.body_sy   = snap['body_sy']
         self.cd.body_sz   = snap['body_sz']
         self.cd.name      = snap['name']
+        self.cd.difficulty = snap.get('difficulty', 'normal')  # handle old undo snapshots
         self.cd.parts     = snap['parts']
 
         bc = PALETTE[self.cd.color_idx % len(PALETTE)]
@@ -799,6 +886,7 @@ class Sculptor:
         if self.size_txt: self.size_txt.text = self.cd.size_label()
         self._deselect()
         self._cancel_pick()
+        self._update_difficulty_btn()
         self._refresh_body()
         self._flash('Undone.', col=c8(200,200,255))
 
