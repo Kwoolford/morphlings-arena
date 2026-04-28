@@ -55,7 +55,7 @@ PART_TO_MUT = {
     'horn': 'horns', 'tail': 'tail', 'wing': 'wings', 'spike': 'spikes',
 }
 
-CURRENT_SAVE_VERSION = 4
+CURRENT_SAVE_VERSION = 5
 
 
 @dataclass
@@ -67,6 +67,7 @@ class PartData:
     rot_y:     float = 0.0
     scale:     float = 1.0
     color_idx: int   = -1    # -1 = inherit body color
+    socket_id: int   = -1    # -1 = freeform; >=0 = socket index on body grid
 
     def to_dict(self):
         return asdict(self)
@@ -100,6 +101,13 @@ class CreatureData:
     best_score:  int  = 0
     bonus_budget: int = 0   # extra mutation points earned by surviving waves
     difficulty: str = 'normal'  # arena difficulty mode
+    # Forge system (persistent upgrades)
+    spine_crystals: int = 0   # earned per wave survived, persists across runs
+    forge_dmg_bonus: float = 0.0   # permanent damage bonus
+    forge_hp_bonus: float = 0.0    # permanent max health bonus
+    forge_spd_bonus: float = 0.0   # permanent speed bonus
+    forge_lucky: bool = False      # first upgrade of run is >=uncommon
+    forge_iron_start: bool = False # start with 2s shield each run
     # Sculptor parts
     parts:      list  = field(default_factory=list)
     version:    int   = CURRENT_SAVE_VERSION
@@ -211,7 +219,7 @@ class CreatureData:
 
 
 def _migrate(data):
-    """Migrate v1 (absolute positions) → v2 (normalized) → v3 (body shape axes)."""
+    """Migrate v1→v2→v3→v4→v5: positions, shape axes, budget, socket grid."""
     ver = data.get('version', 1)
     if ver < 2 and 'parts' in data:
         bs = 0.65 + data.get('body_size', 0.5) * 0.5
@@ -229,4 +237,17 @@ def _migrate(data):
     if ver < 4:
         data.setdefault('bonus_budget', 0)
         data['version'] = 4
+    if ver < 5:
+        # Socket grid: all existing parts marked as freeform (-1)
+        if 'parts' in data:
+            for p in data['parts']:
+                p.setdefault('socket_id', -1)
+        # Spine crystals and forge upgrades
+        data.setdefault('spine_crystals', 0)
+        data.setdefault('forge_dmg_bonus', 0.0)
+        data.setdefault('forge_hp_bonus', 0.0)
+        data.setdefault('forge_spd_bonus', 0.0)
+        data.setdefault('forge_lucky', False)
+        data.setdefault('forge_iron_start', False)
+        data['version'] = 5
     return data
