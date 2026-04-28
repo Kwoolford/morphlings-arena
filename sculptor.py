@@ -919,6 +919,7 @@ class Sculptor:
                 if hasattr(e, '_anim_attr'):
                     # Left-side parts (px < 0) are pi out of phase → alternating gait
                     phase = math.pi if sp.pd.px < 0 else 0.0
+                    phase += getattr(e, '_anim_phase', 0.0)
                     val   = e._anim_amp * math.sin(t * e._anim_freq * tau + phase)
                     setattr(e, e._anim_attr, val)
 

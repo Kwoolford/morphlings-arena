@@ -225,23 +225,8 @@ class Morphling(Entity):
                    scale=self.bs*0.18, position=Vec3(0, self.bs*1.35, 0))
 
     def _random_visual(self):
-        # TODO: use generate_enemy_cd for random enemies so visuals match stats
-        bs = self.bs
-        bc = _rc()
-        build_body_base(self, bc, bs)
-        if random.random() < 0.6:
-            for ss in (-1,1):
-                Entity(parent=self, model='sphere', color=bc,
-                       scale=Vec3(bs*0.21, bs*0.21, bs*0.27),
-                       position=Vec3(ss*bs*0.60, bs*0.08, 0), rotation_z=ss*35)
-        if random.random() < 0.6:
-            for ss in (-1,1):
-                Entity(parent=self, model='sphere', color=bc,
-                       scale=Vec3(bs*0.22, bs*0.28, bs*0.22),
-                       position=Vec3(ss*bs*0.26, -bs*0.46, 0))
-        if random.random() < 0.5:
-            Entity(parent=self, model='sphere', color=bc,
-                   scale=bs*0.19, position=Vec3(0, bs*0.05, -bs*0.57))
+        enemy_cd = generate_enemy_cd(self.arena.wave)
+        _, _, self._anim_pivots = build_creature(self, enemy_cd)
 
     def _make_hbar(self):
         by = self.bs * 1.55 + 0.5
@@ -593,6 +578,7 @@ class Morphling(Entity):
         tau     = math.pi * 2
         for pivot in self._anim_pivots:
             phase = math.pi if getattr(pivot, '_anim_px', 0) < 0 else 0.0
+            phase += getattr(pivot, '_anim_phase', 0.0)
             val   = pivot._anim_amp * anim_spd * math.sin(
                         t * pivot._anim_freq * tau * anim_spd + phase)
             setattr(pivot, pivot._anim_attr, val)
