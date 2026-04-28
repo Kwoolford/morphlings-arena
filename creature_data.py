@@ -55,19 +55,20 @@ PART_TO_MUT = {
     'horn': 'horns', 'tail': 'tail', 'wing': 'wings', 'spike': 'spikes',
 }
 
-CURRENT_SAVE_VERSION = 5
+CURRENT_SAVE_VERSION = 6
 
 
 @dataclass
 class PartData:
-    type:      str   = 'arm'
-    px:        float = 0.0   # NORMALIZED position (body-radius units)
-    py:        float = 0.0
-    pz:        float = 0.0
-    rot_y:     float = 0.0
-    scale:     float = 1.0
-    color_idx: int   = -1    # -1 = inherit body color
-    socket_id: int   = -1    # -1 = freeform; >=0 = socket index on body grid
+    type:             str   = 'arm'
+    px:               float = 0.0   # NORMALIZED position (body-radius units)
+    py:               float = 0.0
+    pz:               float = 0.0
+    rot_y:            float = 0.0
+    scale:            float = 1.0
+    color_idx:        int   = -1    # -1 = inherit body color
+    socket_id:        int   = -1    # -1 = freeform; >=0 = socket index on body grid
+    parent_socket_id: int   = -1    # -1 = attached to body; >=0 = attached to parent part's output socket
 
     def to_dict(self):
         return asdict(self)
@@ -219,7 +220,7 @@ class CreatureData:
 
 
 def _migrate(data):
-    """Migrate v1→v2→v3→v4→v5: positions, shape axes, budget, socket grid."""
+    """Migrate v1→v2→v3→v4→v5→v6: positions, shape axes, budget, socket grid, part chains."""
     ver = data.get('version', 1)
     if ver < 2 and 'parts' in data:
         bs = 0.65 + data.get('body_size', 0.5) * 0.5
@@ -250,4 +251,10 @@ def _migrate(data):
         data.setdefault('forge_lucky', False)
         data.setdefault('forge_iron_start', False)
         data['version'] = 5
+    if ver < 6:
+        # Part chains: all parts attached to body (no parent chains yet)
+        if 'parts' in data:
+            for p in data['parts']:
+                p.setdefault('parent_socket_id', -1)
+        data['version'] = 6
     return data

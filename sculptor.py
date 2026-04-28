@@ -203,6 +203,7 @@ class Sculptor:
         self.name_txt     = None
         self.size_txt     = None
         self.mirror_btn   = None
+        self.skeleton_btn = None
         self.budget_txt   = None
         self.sel_txt      = None
         self.stat_txt     = None
@@ -216,6 +217,10 @@ class Sculptor:
         # Socket grid system
         self._socket_ents = []      # socket indicator entities
         self._socket_occupancy = {} # socket_idx -> SculptPart (None = empty)
+
+        # Skeleton visualization
+        self._skeleton_ents = []    # bone entities
+        self._skeleton_enabled = False
 
         self._build_scene()
         self._build_ui()
@@ -338,12 +343,14 @@ class Sculptor:
         self._btn('CLEAR', (0.625, 0.162), (0.100, 0.032), c8(120,60,20),   self._clear_all)
         self.budget_txt = self._txt('', (0.760, 0.162), sc=0.48, col=color.lime)
 
-        # Parts palette + mirror
+        # Parts palette + mirror + skeleton
         self._txt('-'*30, (0.645, 0.130), sc=0.48, col=c8(50,50,70))
         self._txt('PARTS  (pick, then click body)', (0.555, 0.110),
                   sc=0.48, col=c8(170,170,210))
         self.mirror_btn = self._btn('MIRROR: OFF', (0.785, 0.110), (0.150, 0.032),
                                      c8(60,60,80), self._toggle_mirror)
+        self.skeleton_btn = self._btn('BONES: OFF', (0.785, 0.076), (0.150, 0.032),
+                                       c8(60,80,60), self._toggle_skeleton)
 
         ptypes = part_types()
         for idx, ptype in enumerate(ptypes):
@@ -404,9 +411,9 @@ class Sculptor:
                           (lambda d=diff_key: self._set_difficulty(d)))
             self._difficulty_btns[diff_key] = btn
 
-        self._txt('Drag: spin   W/S: height   Scroll: zoom   '
-                  'Click body: place   Click part: select   Esc: cancel',
-                  (-0.22, -0.47), sc=0.44, col=color.gray)
+        self._txt('F1-F4: Debug   K: Skeleton   Drag: spin   W/S: height   Scroll: zoom   '
+                  'Click body: place   Click part: select',
+                  (-0.22, -0.47), sc=0.40, col=color.gray)
 
         self._refresh_stats()
         self._refresh_sel_panel()
@@ -508,6 +515,81 @@ class Sculptor:
                 position=pos
             )
             self._socket_ents.append(socket_ring)
+
+        # Rebuild skeleton if enabled
+        if self._skeleton_enabled:
+            self._rebuild_skeleton()
+
+    def _toggle_skeleton(self):
+        """Toggle skeleton visualization (bones between parts)."""
+        self._skeleton_enabled = not self._skeleton_enabled
+        self._update_skeleton_btn()
+        if self._skeleton_enabled:
+            self._rebuild_skeleton()
+        else:
+            self._clear_skeleton()
+
+    def _update_skeleton_btn(self):
+        """Update skeleton button text."""
+        if self.skeleton_btn:
+            self.skeleton_btn.text = f'BONES: {"ON" if self._skeleton_enabled else "OFF"}'
+
+    def _rebuild_skeleton(self):
+        """Build wireframe bones connecting parts to body center."""
+        self._clear_skeleton()
+        if not self.placed_parts:
+            return
+
+        bs = self.cd.bs
+        body_center = Vec3(0, 0, 0)
+
+        for sp in self.placed_parts:
+            # Draw bone from body center to part
+            part_pos = sp.position
+            bone_start = body_center
+            bone_end = part_pos
+
+            # Create a thin cylinder representing the bone
+            bone_len = (bone_end - bone_start).length()
+            if bone_len < 0.001:
+                continue
+
+            bone_mid = (bone_start + bone_end) * 0.5
+            bone_dir = (bone_end - bone_start).normalized()
+
+            # Create a very thin cube as bone
+            bone = Entity(
+                model='cube',
+                color=c8(200, 200, 100),
+                scale=Vec3(0.04, 0.04, bone_len),
+                position=bone_mid,
+                rotation=self._look_at_rotation(bone_dir)
+            )
+            self._skeleton_ents.append(bone)
+
+            # Draw small sphere at joint
+            joint = Entity(
+                model='sphere',
+                color=c8(255, 200, 100),
+                scale=0.08,
+                position=part_pos
+            )
+            self._skeleton_ents.append(joint)
+
+    def _look_at_rotation(self, direction):
+        """Get rotation to point along direction (Y-up)."""
+        if direction.length() < 0.001:
+            return Vec3(0, 0, 0)
+        direction = direction.normalized()
+        # Simple rotation: point along Z
+        yaw = math.degrees(math.atan2(direction.x, direction.z))
+        pitch = math.degrees(math.asin(-direction.y))
+        return Vec3(pitch, yaw, 0)
+
+    def _clear_skeleton(self):
+        """Clear skeleton visualization."""
+        for e in self._skeleton_ents: destroy(e)
+        self._skeleton_ents.clear()
 
     # ── center of mass ───────────────────────────────────────────────────────
     def _compute_com(self):
@@ -920,6 +1002,7 @@ class Sculptor:
         if key == 'f2': self.debug_overlay.toggle_aggro(); return
         if key == 'f3': self.debug_overlay.toggle_attachment(); return
         if key == 'f4': self.debug_overlay.toggle_body_ellipsoid(); return
+        if key == 'k': self._toggle_skeleton(); return
         if key == 'right mouse down':
             self._drag_active = True
         elif key == 'right mouse up':
