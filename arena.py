@@ -27,7 +27,7 @@ TODO: visual indicator on player when berserk/overdrive passive is active
 """
 from ursina import (
     Entity, Text, Button, Vec3, camera, color, time, destroy, invoke,
-    held_keys, lerp, clamp, curve, application,
+    held_keys, lerp, clamp, curve, application, raycast, sequence, Wait,
 )
 import random, math
 
@@ -52,9 +52,11 @@ def _rc():       return random.choice(PALETTE)
 _FIGHTING     = 'fighting'
 _WAVE_CLEAR   = 'wave_clear'
 _UPGRADE_PICK = 'upgrade_pick'
+_SHOP         = 'shop'          # in-arena shop between waves
 _INTERMISSION = 'intermission'   # upgrade applied; waiting for next-wave invoke
 _WAVE_START   = 'wave_start'
 _GAME_OVER    = 'game_over'
+_SMITE_MODE   = 'smite_targeting'  # player aiming smite ability
 
 _WAVE_CLEAR_DELAY = 1.2   # seconds between last kill and upgrade screen
 _WAVE_START_DELAY = 2.8   # seconds of "WAVE N" banner before enemies spawn
@@ -452,6 +454,7 @@ class Morphling(Entity):
             self.arena._on_player_death()
         elif self.arena.wave_state == _FIGHTING:
             self.arena.kills += 1
+            self.arena.shards += 10
         if self in self.arena.morphlings:
             self.arena.morphlings.remove(self)
         destroy(self)
@@ -632,7 +635,15 @@ class Arena:
         self.wave_state  = _WAVE_START
         self.wave_timer  = 0.0
         self._upgrade_ents = []
+        self._shop_ents    = []
         self._wave_banner  = None   # current banner Text (not in _hud_ents)
+
+        # Currency and shop
+        self.shards      = 0    # in-run currency, resets each run
+        self.smite_charges = 0
+        self._smite_mode = False
+        self._smite_indicator = None
+        self._current_upgrades = []  # Store for keyboard shortcut access
 
         # Camera
         self.cam_yaw     = 0.0
@@ -664,6 +675,10 @@ class Arena:
         floor = Entity(model='plane', scale=(ARENA_SIZE*2,1,ARENA_SIZE*2),
                        texture='white_cube', color=color.dark_gray)
         self._scene_ents.append(floor)
+        # Floor collider for smite targeting
+        self.floor_hit = Entity(model='plane', scale=ARENA_SIZE*2,
+                                collider='box', visible=False, y=0.02)
+        self._scene_ents.append(self.floor_hit)
         self._build_fence()
 
     def _build_fence(self):
@@ -748,13 +763,14 @@ class Arena:
     def _show_upgrades(self):
         self.wave_state = _UPGRADE_PICK
         self.paused     = True
-        self._build_upgrade_ui(pick_upgrades(self.wave, count=3))
+        self._current_upgrades = pick_upgrades(self.wave, count=3)
+        self._build_upgrade_ui(self._current_upgrades)
 
     def _apply_upgrade(self, upgrade):
-        """Apply chosen upgrade, unblock inputs, then queue next wave start."""
+        """Apply chosen upgrade, show shop, then continue."""
         self._clear_upgrade_ui()
-        self.paused     = False
-        self.wave_state = _INTERMISSION   # inputs unblocked while banner shows
+        self.paused     = True
+        self.wave_state = _SHOP
 
         if self.player and self.player.alive:
             try:
@@ -763,18 +779,8 @@ class Arena:
                 print(f'[upgrade] apply error ({upgrade.key}): {exc}')
             self.player._update_hbar()
 
-        # Grant extra creator budget every BUDGET_INTERVAL waves
-        target_bonus = total_budget_bonus(self.wave)
-        if target_bonus > self.cd.bonus_budget:
-            gained = target_bonus - self.cd.bonus_budget
-            self.cd.bonus_budget = target_bonus
-            self.cd.save()
-            self._show_wave_banner(
-                f'+{gained} CREATOR BUDGET  (total +{target_bonus})',
-                c8(255,180,50), duration=3.0)
-            invoke(self._begin_next_wave, delay=3.2)
-        else:
-            self._begin_next_wave()
+        # Show shop after upgrade
+        self._build_shop_ui()
 
     def _check_wave_clear(self):
         if self.wave_state != _FIGHTING: return
@@ -845,6 +851,244 @@ class Arena:
         for e in self._upgrade_ents: destroy(e)
         self._upgrade_ents.clear()
 
+    # ── shop system ──────────────────────────────────────────────────────────
+    SHOP_ITEMS = [
+        {'key': 'heal', 'name': 'Emergency Heal', 'cost': 25, 'desc': 'Restore 60% max HP instantly'},
+        {'key': 'shield', 'name': 'Overclock Shield', 'cost': 35, 'desc': '3-second full damage immunity'},
+        {'key': 'speed', 'name': 'Speed Elixir', 'cost': 20, 'desc': '+50% speed for 45 seconds'},
+        {'key': 'smite', 'name': 'SMITE CHARGE', 'cost': 60, 'desc': 'Add 1 smite charge ability'},
+        {'key': 'banish', 'name': 'Wave Banish', 'cost': 45, 'desc': 'Remove 2 random enemies next wave'},
+        {'key': 'refresh', 'name': 'Refresh Upgrades', 'cost': 30, 'desc': 'Re-roll upgrade options next wave'},
+    ]
+
+    def _show_shop(self):
+        if self.wave_state != _UPGRADE_PICK:
+            return
+        self.wave_state = _SHOP
+        self.paused = True
+        self._build_shop_ui()
+
+    def _build_shop_ui(self):
+        ui = camera.ui
+
+        ov = Entity(model='quad', color=ca(0,0,0,175),
+                    scale=(2.0, 1.2), position=(0,0), parent=ui)
+        self._shop_ents.append(ov)
+
+        hdr = Text(f'💎 MORPH SHOP  —  Balance: {self.shards} Shards',
+                   position=(0, 0.32), scale=0.95,
+                   color=c8(100,200,255), origin=(0,0), parent=ui)
+        self._shop_ents.append(hdr)
+
+        card_w, card_h = 0.27, 0.42
+        gap = 0.04
+        positions = [
+            (-(card_w + gap), 0.12),
+            (0.0, 0.12),
+            (card_w + gap, 0.12),
+            (-(card_w + gap), -0.20),
+            (0.0, -0.20),
+            (card_w + gap, -0.20),
+        ]
+
+        for item, (cx, cy) in zip(self.SHOP_ITEMS, positions):
+            can_afford = self.shards >= item['cost']
+
+            card_col = c8(60,120,180) if can_afford else c8(60,60,60)
+            border_col = c8(120,200,255) if can_afford else c8(80,80,80)
+            text_col = color.white if can_afford else c8(150,150,150)
+            button_col = c8(40,100,160) if can_afford else c8(50,50,50)
+
+            self._shop_ents.append(Entity(
+                model='quad', color=border_col,
+                scale=(card_w+0.012, card_h+0.012),
+                position=(cx, cy, 0.001), parent=ui))
+            self._shop_ents.append(Entity(
+                model='quad', color=card_col,
+                scale=(card_w, card_h), position=(cx, cy), parent=ui))
+
+            self._shop_ents.append(Text(
+                item['name'],
+                position=(cx, cy+0.155), scale=0.78,
+                color=text_col, origin=(0,0), parent=ui))
+            self._shop_ents.append(Entity(
+                model='quad', color=border_col,
+                scale=(card_w*0.88, 0.003),
+                position=(cx, cy+0.105), parent=ui))
+
+            for li, line in enumerate(_wrap(item['desc'], 24)):
+                self._shop_ents.append(Text(
+                    line, position=(cx, cy+0.060 - li*0.036),
+                    scale=0.52, color=c8(180,200,220),
+                    origin=(0,0), parent=ui))
+
+            cost_text = f"💎 {item['cost']}"
+            self._shop_ents.append(Text(
+                cost_text, position=(cx, cy-0.135),
+                scale=0.60, color=border_col, origin=(0,0), parent=ui))
+
+            btn = Button(
+                text='BUY' if can_afford else 'LOCKED',
+                position=(cx, cy-0.175),
+                scale=(card_w*0.75, 0.045),
+                color=button_col,
+                highlight_color=c8(150,220,255) if can_afford else button_col,
+                on_click=(lambda i=item: self._apply_shop_item(i)) if can_afford else None,
+                parent=ui)
+            if not can_afford:
+                btn.disabled = True
+            self._shop_ents.append(btn)
+
+        close_btn = Button(
+            text='CONTINUE', position=(0, -0.41),
+            scale=(0.22, 0.055),
+            color=c8(100,150,100),
+            highlight_color=c8(150,200,150),
+            on_click=self._close_shop,
+            parent=ui)
+        self._shop_ents.append(close_btn)
+
+    def _apply_shop_item(self, item):
+        key = item['key']
+        if self.shards < item['cost']:
+            return
+
+        self.shards -= item['cost']
+
+        if key == 'heal' and self.player:
+            self.player.health = min(self.player.max_health,
+                                     self.player.health + self.player.max_health * 0.60)
+            self.player._update_hbar()
+        elif key == 'shield' and self.player:
+            self.player.shield_timer = 3.0
+            self.player._update_hbar()
+        elif key == 'speed' and self.player:
+            self.player.speed *= 1.5
+            invoke(lambda: setattr(self.player, 'speed', self.player.speed / 1.5), delay=45)
+        elif key == 'smite':
+            self.smite_charges += 1
+        elif key == 'banish':
+            enemies = [m for m in self.morphlings if not m.is_player and m.alive]
+            to_remove = min(2, len(enemies))
+            for _ in range(to_remove):
+                victim = random.choice(enemies)
+                enemies.remove(victim)
+                victim.alive = False
+                destroy(victim)
+        elif key == 'refresh':
+            self._current_upgrades.clear()
+
+        self._rebuild_shop_ui()
+
+    def _rebuild_shop_ui(self):
+        self._clear_shop_ui()
+        self._build_shop_ui()
+
+    def _close_shop(self):
+        self._clear_shop_ui()
+        self.paused = False
+        self.wave_state = _INTERMISSION
+
+        # Grant extra creator budget every BUDGET_INTERVAL waves
+        target_bonus = total_budget_bonus(self.wave)
+        if target_bonus > self.cd.bonus_budget:
+            gained = target_bonus - self.cd.bonus_budget
+            self.cd.bonus_budget = target_bonus
+            self.cd.save()
+            self._show_wave_banner(
+                f'+{gained} CREATOR BUDGET  (total +{target_bonus})',
+                c8(255,180,50), duration=3.0)
+            invoke(self._begin_next_wave, delay=3.2)
+        else:
+            self._begin_next_wave()
+
+    def _clear_shop_ui(self):
+        for e in self._shop_ents: destroy(e)
+        self._shop_ents.clear()
+
+    # ── smite ability ────────────────────────────────────────────────────────
+    def _enter_smite_mode(self):
+        if self.smite_charges <= 0 or self.wave_state != _FIGHTING:
+            return
+        if self._smite_mode:
+            return
+        self._smite_mode = True
+        self._show_smite_indicator()
+
+    def _show_smite_indicator(self):
+        if self._smite_indicator:
+            destroy(self._smite_indicator)
+        self._smite_indicator = Entity(
+            model='circle', color=ca(255, 200, 0, 140),
+            scale=1.0, y=0.01, visible=False)
+
+    def _update_smite_indicator(self):
+        if not self._smite_mode or not self._smite_indicator:
+            return
+        hit_info = raycast(camera.position, camera.forward(), distance=500)
+        if hit_info.hit:
+            self._smite_indicator.position = hit_info.world_point
+            self._smite_indicator.visible = True
+        else:
+            self._smite_indicator.visible = False
+
+    def _fire_smite(self, target_pos):
+        if self.smite_charges <= 0:
+            return
+        self.smite_charges -= 1
+        self._smite_mode = False
+        if self._smite_indicator:
+            destroy(self._smite_indicator)
+            self._smite_indicator = None
+
+        # Sword entity
+        sword = Entity(model='cube', color=c8(255, 220, 60),
+                       scale=Vec3(0.4, 5.0, 0.4),
+                       position=target_pos + Vec3(0, 22, 0))
+        self._scene_ents.append(sword)
+
+        # Animate sword falling
+        from ursina import sequence, Wait
+        def on_land():
+            destroy(sword)
+            self._deal_smite_damage(target_pos)
+            self._create_smite_ring(target_pos)
+
+        sequence(
+            Wait(0.1),
+            sword.animate_position(target_pos + Vec3(0, 0.5, 0), duration=0.35, curve=curve.out_cubic),
+            invoke(on_land)
+        )
+
+    def _deal_smite_damage(self, center):
+        for m in self.morphlings[:]:
+            if not m.alive:
+                continue
+            dist = (m.position - center).length()
+            if dist < 5.0:
+                damage = 250
+            elif dist < 9.0:
+                damage = 100
+            else:
+                continue
+            m.take_damage(damage, attacker=self.player)
+
+    def _create_smite_ring(self, center):
+        ring = Entity(model='circle', color=ca(255, 200, 0, 180),
+                      scale=0.1, y=0.02, position=center)
+        self._scene_ents.append(ring)
+        from ursina import sequence, Wait
+        sequence(
+            ring.animate_scale(6.0, duration=0.4, curve=curve.out_cubic),
+            invoke(lambda: destroy(ring) if ring in self._scene_ents else None)
+        )
+
+    def _cancel_smite(self):
+        self._smite_mode = False
+        if self._smite_indicator:
+            destroy(self._smite_indicator)
+            self._smite_indicator = None
+
     # ── wave banner ──────────────────────────────────────────────────────────
     def _show_wave_banner(self, msg, col, duration=2.0):
         """Show a transient centred banner. Managed separately from _hud_ents."""
@@ -869,12 +1113,13 @@ class Arena:
         self.score_txt  = Text('', position=(-0.85, 0.37), scale=0.68, color=c8(200,255,200))
         self.kills_txt  = Text('', position=(-0.85, 0.32), scale=0.64, color=c8(180,255,180))
         self.budget_txt = Text('', position=(-0.85, 0.27), scale=0.60, color=c8(255,180,50))
+        self.shards_txt = Text('', position=(0.65, -0.45), scale=0.56, color=c8(100,200,255))
         self.hud_hint   = Text(
             'WASD:Pan  Q/E:Orbit  Z/X:Tilt  Scroll:Zoom  '
-            'F:Follow  P:Pause  C:Creator  R:Reset',
+            'F:Follow  P:Pause  C:Creator  R:Reset  B:Shop  M:Smite',
             position=(-0.85,-0.47), scale=0.48, color=color.white)
         self._hud_ents += [self.wave_txt, self.count_text, self.score_txt,
-                           self.kills_txt, self.budget_txt, self.hud_hint]
+                           self.kills_txt, self.budget_txt, self.shards_txt, self.hud_hint]
 
     # ── cleanup ──────────────────────────────────────────────────────────────
     def destroy_all(self):
@@ -886,6 +1131,8 @@ class Arena:
         for e in self._hud_ents:      destroy(e)
         for e in self._gameover_ents: destroy(e)
         self._clear_upgrade_ui()
+        self._clear_shop_ui()
+        self._cancel_smite()
         if self._wave_banner:
             destroy(self._wave_banner)
             self._wave_banner = None
@@ -964,6 +1211,8 @@ class Arena:
         for m in self.morphlings[:]: destroy(m)
         for p in self.projectiles[:]: destroy(p)
         self._clear_upgrade_ui()
+        self._clear_shop_ui()
+        self._cancel_smite()
         if self._wave_banner:
             destroy(self._wave_banner)
             self._wave_banner = None
@@ -976,6 +1225,8 @@ class Arena:
         self.wave_state = _WAVE_START
         self.wave_timer = 0.0
         self.paused     = False
+        self.shards     = 0
+        self.smite_charges = 0
         self._spawn_player()
         self._begin_next_wave()
 
@@ -986,14 +1237,26 @@ class Arena:
         if key == 'f2': self.debug_overlay.toggle_aggro(); return
         if key == 'f3': self.debug_overlay.toggle_attachment(); return
         if key == 'f4': self.debug_overlay.toggle_body_ellipsoid(); return
-        # ESC always quits, even during upgrade pick
+        # ESC always quits or cancels smite
         if key == 'escape':
+            if self._smite_mode:
+                self._cancel_smite()
+                return
             application.quit()
+            return
+        # Smite targeting mode
+        if self._smite_mode:
+            if key == 'left mouse up':
+                hit_info = raycast(camera.position, camera.forward(), distance=500)
+                if hit_info.hit:
+                    self._fire_smite(hit_info.world_point)
             return
         # All other inputs blocked while upgrade cards are visible
         if self.wave_state == _UPGRADE_PICK:
             return
-        if key == 'r':   self._reset_arena()
+        if key == 'm':   self._enter_smite_mode()
+        elif key == 'b': self._show_shop()
+        elif key == 'r': self._reset_arena()
         elif key == 'p': self.paused = not self.paused
         elif key == 'c': self.on_back()
         elif key == 'f':
@@ -1029,6 +1292,7 @@ class Arena:
             _WAVE_START:   '  [INCOMING…]',
             _WAVE_CLEAR:   '  [WAVE CLEAR]',
             _UPGRADE_PICK: '  [PICK UPGRADE]',
+            _SHOP:         '  [SHOP]',
             _INTERMISSION: '',
             _FIGHTING:     '',
             _GAME_OVER:    '',
@@ -1042,6 +1306,11 @@ class Arena:
         nxt   = BUDGET_INTERVAL - (self.wave % BUDGET_INTERVAL) if self.wave % BUDGET_INTERVAL else BUDGET_INTERVAL
         self.budget_txt.text = (f'Creator Bonus: +{bonus} pt'
                                 f'  (next +{BUDGET_AMOUNT} in {nxt} wave{"s" if nxt!=1 else ""})')
+        self.shards_txt.text = f'💎 {self.shards} Shards' + (f'  | Smite: {self.smite_charges}' if self.smite_charges > 0 else '')
+
+        # Update smite indicator if targeting
+        if self._smite_mode:
+            self._update_smite_indicator()
 
         if self.paused: return
 

@@ -210,6 +210,7 @@ class Sculptor:
         self._morph_idx   = 0
         self._morph_label = None
         self._shape_labels = {}   # axis -> Text widget showing current value
+        self._difficulty_btns = {}  # difficulty key -> Button widget
 
         self._build_scene()
         self._build_ui()
@@ -383,6 +384,21 @@ class Sculptor:
         self._btn('SAVE',   (0.583, -0.455), (0.110, 0.046), c8(50,120,50),  self._save)
         self._btn('FIGHT!', (0.724, -0.455), (0.140, 0.046), c8(180,60,30),  self.on_fight)
 
+        # Difficulty selector
+        self._txt('Difficulty', (0.515, -0.410), sc=0.52, col=color.gray)
+        difficulties = [
+            ('easy',      'EASY',       c8(80,180,80)),
+            ('normal',    'NORMAL',     c8(180,180,80)),
+            ('hard',      'HARD',       c8(200,100,50)),
+            ('nightmare', 'NIGHTMARE',  c8(200,50,50)),
+        ]
+        self._difficulty_btns = {}
+        for i, (diff_key, label, col) in enumerate(difficulties):
+            x = 0.520 + i * 0.060
+            btn = self._btn(label, (x, -0.410), (0.054, 0.032), col,
+                          (lambda d=diff_key: self._set_difficulty(d)))
+            self._difficulty_btns[diff_key] = btn
+
         self._txt('Drag: spin   W/S: height   Scroll: zoom   '
                   'Click body: place   Click part: select   Esc: cancel',
                   (-0.22, -0.47), sc=0.44, col=color.gray)
@@ -391,6 +407,7 @@ class Sculptor:
         self._refresh_sel_panel()
         self._refresh_budget()
         self._update_mirror_btn()
+        self._update_difficulty_btn()
 
     # ── refresh helpers ──────────────────────────────────────────────────────
     def _refresh_stats(self):
@@ -439,6 +456,17 @@ class Sculptor:
             if lbl:
                 lbl.text = f'{getattr(self.cd, axis):.2f}'
 
+    def _set_difficulty(self, difficulty_key):
+        self._push_undo()
+        self.cd.difficulty = difficulty_key
+        self._update_difficulty_btn()
+
+    def _update_difficulty_btn(self):
+        """Update button highlights to show active difficulty."""
+        for key, btn in self._difficulty_btns.items():
+            if btn:
+                btn.highlight_color = c8(255, 255, 100) if key == self.cd.difficulty else btn.color
+
     # ── center of mass ───────────────────────────────────────────────────────
     def _compute_com(self):
         if not self.placed_parts:
@@ -446,9 +474,12 @@ class Sculptor:
         total_w = sum(sp.pd.scale for sp in self.placed_parts)
         if total_w < 0.001:
             return Vec3(0, 0, 0)
+        sx = self.cd.body_sx
+        sy = self.cd.body_sy
+        sz = self.cd.body_sz
         total_p = Vec3(0, 0, 0)
         for sp in self.placed_parts:
-            total_p += Vec3(sp.pd.px, sp.pd.py, sp.pd.pz) * sp.pd.scale
+            total_p += Vec3(sp.pd.px*sx, sp.pd.py*sy, sp.pd.pz*sz) * sp.pd.scale
         return total_p / total_w * self.cd.bs
 
     # ── name / color / size / shape ──────────────────────────────────────────
