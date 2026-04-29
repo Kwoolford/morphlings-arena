@@ -40,7 +40,7 @@ from parts import PART_REGISTRY, make_part, part_types
 from render import build_body_base, add_eyes
 from morphs import MORPH_KEYS, make as make_morph
 from debug import DebugOverlay
-from sockets import BODY_SOCKETS, nearest_socket, socket_world_pos
+from sockets import BODY_SOCKETS, nearest_socket, socket_world_pos, orient_part_for_socket
 
 
 # How far (in normalized body-radius units) parts sit from body center.
@@ -99,9 +99,21 @@ class SculptPart(Entity):
         self.sx, self.sy, self.sz = sx, sy, sz
         self._vis     = []
         self._hover_glow = None
-        self.position   = Vec3(pd.px * sx, pd.py * sy, pd.pz * sz) * body_size
-        self.rotation_y = pd.rot_y
+        self._apply_pose(body_size, sx, sy, sz)
         self._build_visuals(body_color, body_size)
+
+    def _apply_pose(self, body_size, sx, sy, sz):
+        """Position and orient this SculptPart according to its socket or freeform data."""
+        info = PART_REGISTRY.get(self.pd.type)
+        if self.pd.socket_id >= 0 and info:
+            # Socket-placed: orient at body center so default_offset puts part at surface
+            default_off_fn = info.get('default_offset')
+            default_off = default_off_fn(1.0) if default_off_fn else Vec3(0, 0, 1)
+            orient_part_for_socket(self, self.pd.socket_id, body_size, sx, sy, sz, default_off)
+        else:
+            # Legacy freeform fallback
+            self.position = Vec3(self.pd.px * sx, self.pd.py * sy, self.pd.pz * sz) * body_size
+            self.rotation_y = self.pd.rot_y
 
     def _build_visuals(self, body_color, body_size):
         for e in self._vis: destroy(e)
@@ -124,7 +136,7 @@ class SculptPart(Entity):
     def update_for_size(self, body_color, body_size, sx=1.0, sy=1.0, sz=1.0):
         self.body_size = body_size
         self.sx, self.sy, self.sz = sx, sy, sz
-        self.position = Vec3(self.pd.px * sx, self.pd.py * sy, self.pd.pz * sz) * body_size
+        self._apply_pose(body_size, sx, sy, sz)
         self.scale    = body_size * 0.45
         self._build_visuals(body_color, body_size)
         # Rebuild hover glow if it exists
@@ -343,14 +355,14 @@ class Sculptor:
         self._btn('CLEAR', (0.625, 0.162), (0.100, 0.032), c8(120,60,20),   self._clear_all)
         self.budget_txt = self._txt('', (0.760, 0.162), sc=0.48, col=color.lime)
 
-        # Parts palette + mirror + skeleton
+        # Parts palette + mirror
         self._txt('-'*30, (0.645, 0.130), sc=0.48, col=c8(50,50,70))
-        self._txt('PARTS  (pick, then click body)', (0.555, 0.110),
-                  sc=0.48, col=c8(170,170,210))
-        self.mirror_btn = self._btn('MIRROR: OFF', (0.785, 0.110), (0.150, 0.032),
+        self._txt('PARTS  (pick, then click body)', (0.500, 0.110),
+                  sc=0.46, col=c8(170,170,210))
+        self.mirror_btn = self._btn('MIRROR: OFF', (0.790, 0.110), (0.130, 0.030),
                                      c8(60,60,80), self._toggle_mirror)
-        self.skeleton_btn = self._btn('BONES: OFF', (0.785, 0.076), (0.150, 0.032),
-                                       c8(60,80,60), self._toggle_skeleton)
+        # Skeleton toggle uses K key (no button to avoid UI overlap)
+        self.skeleton_btn = None
 
         ptypes = part_types()
         for idx, ptype in enumerate(ptypes):
@@ -392,28 +404,30 @@ class Sculptor:
         self.stat_txt = self._txt('', (0.645, del_y-0.048),
                                    sc=0.48, col=c8(170,210,255))
 
+        # Difficulty selector — placed above the action button row
+        self._txt('DIFFICULTY', (0.430, -0.395), sc=0.46, col=c8(170,170,210))
+        difficulties = [
+            ('easy',      'E',  c8(80,180,80)),
+            ('normal',    'N',  c8(180,180,80)),
+            ('hard',      'H',  c8(200,100,50)),
+            ('nightmare', 'X',  c8(200,50,50)),
+        ]
+        self._difficulty_btns = {}
+        for i, (diff_key, label, col) in enumerate(difficulties):
+            x = 0.530 + i * 0.044
+            btn = self._btn(label, (x, -0.395), (0.040, 0.030), col,
+                          (lambda d=diff_key: self._set_difficulty(d)))
+            self._difficulty_btns[diff_key] = btn
+        self.difficulty_label_txt = self._txt('Normal', (0.770, -0.395), sc=0.50, col=color.white)
+
+        # Action buttons
         self._btn('UNDO',   (0.462, -0.455), (0.100, 0.046), c8(70,70,110),  self._undo)
         self._btn('SAVE',   (0.583, -0.455), (0.110, 0.046), c8(50,120,50),  self._save)
         self._btn('FIGHT!', (0.724, -0.455), (0.140, 0.046), c8(180,60,30),  self.on_fight)
 
-        # Difficulty selector
-        self._txt('Difficulty', (0.515, -0.410), sc=0.52, col=color.gray)
-        difficulties = [
-            ('easy',      'EASY',       c8(80,180,80)),
-            ('normal',    'NORMAL',     c8(180,180,80)),
-            ('hard',      'HARD',       c8(200,100,50)),
-            ('nightmare', 'NIGHTMARE',  c8(200,50,50)),
-        ]
-        self._difficulty_btns = {}
-        for i, (diff_key, label, col) in enumerate(difficulties):
-            x = 0.520 + i * 0.060
-            btn = self._btn(label, (x, -0.410), (0.054, 0.032), col,
-                          (lambda d=diff_key: self._set_difficulty(d)))
-            self._difficulty_btns[diff_key] = btn
-
-        self._txt('F1-F4: Debug   K: Skeleton   Drag: spin   W/S: height   Scroll: zoom   '
-                  'Click body: place   Click part: select',
-                  (-0.22, -0.47), sc=0.40, col=color.gray)
+        self._txt('F1-F4: Debug    K: Skeleton    Drag: spin    Scroll: zoom    '
+                  'Click body: place    Click part: select    Esc: cancel',
+                  (-0.22, -0.47), sc=0.38, col=color.gray)
 
         self._refresh_stats()
         self._refresh_sel_panel()
@@ -475,10 +489,21 @@ class Sculptor:
         self._update_difficulty_btn()
 
     def _update_difficulty_btn(self):
-        """Update button highlights to show active difficulty."""
+        """Update button highlights to show active difficulty, and update label text."""
         for key, btn in self._difficulty_btns.items():
             if btn:
                 btn.highlight_color = c8(255, 255, 100) if key == self.cd.difficulty else btn.color
+        # Update text label showing current difficulty
+        if hasattr(self, 'difficulty_label_txt') and self.difficulty_label_txt:
+            label_map = {'easy': 'Easy', 'normal': 'Normal', 'hard': 'Hard', 'nightmare': 'Nightmare'}
+            color_map = {
+                'easy': c8(120, 220, 120),
+                'normal': c8(220, 220, 120),
+                'hard': c8(220, 130, 70),
+                'nightmare': c8(230, 80, 80),
+            }
+            self.difficulty_label_txt.text = label_map.get(self.cd.difficulty, 'Normal')
+            self.difficulty_label_txt.color = color_map.get(self.cd.difficulty, color.white)
 
     def _rebuild_socket_occupancy(self):
         """Rebuild socket occupancy dict from placed parts."""
@@ -530,34 +555,37 @@ class Sculptor:
             self._clear_skeleton()
 
     def _update_skeleton_btn(self):
-        """Update skeleton button text."""
+        """Update skeleton button text (no-op if button removed; K key toggles)."""
         if self.skeleton_btn:
             self.skeleton_btn.text = f'BONES: {"ON" if self._skeleton_enabled else "OFF"}'
 
     def _rebuild_skeleton(self):
-        """Build wireframe bones connecting parts to body center."""
+        """Build wireframe bones connecting body center to each part's surface anchor."""
         self._clear_skeleton()
         if not self.placed_parts:
             return
 
         bs = self.cd.bs
+        sx = getattr(self.cd, 'body_sx', 1.0)
+        sy = getattr(self.cd, 'body_sy', 1.0)
+        sz = getattr(self.cd, 'body_sz', 1.0)
         body_center = Vec3(0, 0, 0)
 
         for sp in self.placed_parts:
-            # Draw bone from body center to part
-            part_pos = sp.position
-            bone_start = body_center
-            bone_end = part_pos
+            # Determine the visible attachment point: socket position for socket parts,
+            # or the wrap's position for legacy freeform parts.
+            if sp.pd.socket_id >= 0:
+                part_pos = socket_world_pos(sp.pd.socket_id, bs, sx, sy, sz)
+            else:
+                part_pos = sp.position
 
-            # Create a thin cylinder representing the bone
-            bone_len = (bone_end - bone_start).length()
+            bone_len = (part_pos - body_center).length()
             if bone_len < 0.001:
                 continue
 
-            bone_mid = (bone_start + bone_end) * 0.5
-            bone_dir = (bone_end - bone_start).normalized()
+            bone_mid = (body_center + part_pos) * 0.5
+            bone_dir = (part_pos - body_center).normalized()
 
-            # Create a very thin cube as bone
             bone = Entity(
                 model='cube',
                 color=c8(200, 200, 100),
@@ -567,7 +595,6 @@ class Sculptor:
             )
             self._skeleton_ents.append(bone)
 
-            # Draw small sphere at joint
             joint = Entity(
                 model='sphere',
                 color=c8(255, 200, 100),
@@ -821,7 +848,7 @@ class Sculptor:
         self._rebuild_socket_vis()
 
     def _try_move_part(self):
-        """Reposition the selected part to the cursor's body surface hit."""
+        """Reposition the selected part to a new socket near the cursor."""
         if not self.selected: return
         if mouse.hovered_entity is not self.body_ent: return
 
@@ -835,10 +862,8 @@ class Sculptor:
 
         # Check if socket is occupied (excluding current part)
         if sock_idx in self._socket_occupancy and self._socket_occupancy[sock_idx] is not self.selected:
+            self._flash('Socket occupied!')
             return
-
-        surface_norm = normal * SURFACE_R
-        rot_y = math.degrees(math.atan2(normal.x, normal.z))
 
         self._push_undo()
         sp = self.selected
@@ -847,14 +872,21 @@ class Sculptor:
         if sp.pd.socket_id >= 0 and sp.pd.socket_id in self._socket_occupancy:
             del self._socket_occupancy[sp.pd.socket_id]
 
-        # Occupy new socket
+        # Update part data: socket_id is authoritative; px/py/pz are kept as
+        # surface-position metadata (used for CoM, mirror detection, etc.)
+        surface_norm = normal * SURFACE_R
         sp.pd.socket_id = sock_idx
         sp.pd.px = surface_norm.x
         sp.pd.py = surface_norm.y
         sp.pd.pz = surface_norm.z
-        sp.pd.rot_y = rot_y
-        sp.position = Vec3(sp.pd.px, sp.pd.py, sp.pd.pz) * self.cd.bs
-        sp.rotation_y = rot_y
+        sp.pd.rot_y = math.degrees(math.atan2(normal.x, normal.z))
+
+        # Re-apply pose (orient_part_for_socket handles socket placement properly)
+        sx = getattr(self.cd, 'body_sx', 1.0)
+        sy = getattr(self.cd, 'body_sy', 1.0)
+        sz = getattr(self.cd, 'body_sz', 1.0)
+        sp._apply_pose(self.cd.bs, sx, sy, sz)
+
         self._socket_occupancy[sock_idx] = sp
 
         self._exit_move_mode()

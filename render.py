@@ -17,7 +17,8 @@ TODO: cache part entity trees so do_morph doesn't rebuild from scratch every tim
 from ursina import Entity, Vec3, color
 
 from config import c8, PALETTE
-from parts import make_part
+from parts import make_part, PART_REGISTRY
+from sockets import orient_part_for_socket
 
 
 def add_eyes(parent, hs, offset, iris_color):
@@ -63,7 +64,15 @@ def collect_anim_pivots(entity):
 
 def build_creature(parent, cd):
     """Full creature: body + all placed parts.
-    Returns (body_color, body_size, anim_pivots)."""
+    Returns (body_color, body_size, anim_pivots).
+
+    Part attachment:
+        - Socket-placed parts (socket_id >= 0): wrap is positioned at body center
+          and rotated so the part's natural outward axis aligns with the socket
+          outward normal. The part's default_offset places its anchor at the body
+          surface naturally.
+        - Freeform parts (socket_id == -1): legacy behavior using stored px/py/pz.
+    """
     bc = PALETTE[cd.color_idx % len(PALETTE)]
     bs = cd.bs
     sx = getattr(cd, 'body_sx', 1.0)
@@ -73,14 +82,24 @@ def build_creature(parent, cd):
     anim_pivots = []
     for part_idx, pd in enumerate(cd.get_parts()):
         part_bc = PALETTE[pd.color_idx % len(PALETTE)] if pd.color_idx >= 0 else bc
-        wrap = Entity(parent=parent,
-                      position=Vec3(pd.px * sx, pd.py * sy, pd.pz * sz) * bs,
-                      rotation_y=pd.rot_y)
-        wrap._part_idx = part_idx    # Tag wrap with part index for ability system
+        info = PART_REGISTRY.get(pd.type)
+
+        wrap = Entity(parent=parent)
+        wrap._part_idx = part_idx
+
+        if pd.socket_id >= 0 and info:
+            # Socket-placed: orient wrap so default_offset places part at the socket
+            default_off_fn = info.get('default_offset')
+            default_off = default_off_fn(1.0) if default_off_fn else Vec3(0, 0, 1)
+            orient_part_for_socket(wrap, pd.socket_id, bs, sx, sy, sz, default_off)
+        else:
+            # Legacy freeform: use stored normalized position and yaw
+            wrap.position = Vec3(pd.px * sx, pd.py * sy, pd.pz * sz) * bs
+            wrap.rotation_y = pd.rot_y
+
         entities = make_part(wrap, pd.type, part_bc, bs, scale_mult=pd.scale, pos=None, sx=sx, sy=sy, sz=sz)
         for e in entities:
             if hasattr(e, '_anim_attr'):
-                # Tag with the part's normalized x so arena can set phase for mirroring
                 e._anim_px = pd.px
                 anim_pivots.append(e)
     return bc, bs, anim_pivots

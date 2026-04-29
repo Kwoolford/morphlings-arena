@@ -229,43 +229,32 @@ class Morphling(Entity):
         _, _, self._anim_pivots = build_creature(self, enemy_cd)
 
     def _make_hbar(self):
+        """Health bar: a parented root that holds the bg + fill so they stay aligned.
+        The fill anchors at the LEFT edge so it shrinks rightward as health drops."""
         by = self.bs * 1.55 + 0.5
-        # Single health bar with black border: create outline with 4 thin quads
-        # Main bar (fill)
-        self.hb_fill = Entity(parent=self, model='quad',
-                              color=color.lime if not self.is_player else c8(0,220,255),
-                              scale=Vec3(1.5, 0.15, 1), position=Vec3(0, by, 0),
-                              billboard=True)
-        # Black borders around the bar for visual clarity
-        border_thickness = 0.015
-        # Top border
-        Entity(parent=self, model='quad', color=color.black,
-               scale=Vec3(1.5 + border_thickness*2, border_thickness, 1),
-               position=Vec3(0, by + 0.075 + border_thickness/2, 0.001),
-               billboard=True)
-        # Bottom border
-        Entity(parent=self, model='quad', color=color.black,
-               scale=Vec3(1.5 + border_thickness*2, border_thickness, 1),
-               position=Vec3(0, by - 0.075 - border_thickness/2, 0.001),
-               billboard=True)
-        # Left border
-        Entity(parent=self, model='quad', color=color.black,
-               scale=Vec3(border_thickness, 0.15, 1),
-               position=Vec3(-0.75 - border_thickness/2, by, 0.001),
-               billboard=True)
-        # Right border
-        Entity(parent=self, model='quad', color=color.black,
-               scale=Vec3(border_thickness, 0.15, 1),
-               position=Vec3(0.75 + border_thickness/2, by, 0.001),
-               billboard=True)
-        self.hb_bg = None
-        self.hb_root = None
+        # Root: positions and billboards together so bg/fill never disconnect
+        self.hb_root = Entity(parent=self, position=Vec3(0, by, 0), billboard=True)
+        # Single dark background quad (acts as the bar's frame)
+        Entity(parent=self.hb_root, model='quad', color=c8(20, 20, 20),
+               scale=Vec3(1.55, 0.18, 1), z=0.002)
+        # Fill quad — anchored at left edge so scaling shrinks toward the left
+        # by adjusting x position relative to its scale
+        self._hb_full_w = 1.50
+        self.hb_fill = Entity(
+            parent=self.hb_root, model='quad',
+            color=color.lime if not self.is_player else c8(0, 220, 255),
+            scale=Vec3(self._hb_full_w, 0.14, 1),
+            position=Vec3(0, 0, 0),
+            origin=(-0.5, 0),  # left-anchored so scaling looks correct
+        )
+        # Re-position the fill so its origin is at the left edge of the background
+        self.hb_fill.x = -self._hb_full_w / 2
+        self.hb_bg = None  # legacy field
 
     def _update_hbar(self):
         if not self.hb_fill: return
         r = max(0, self.health / self.max_health)
-        self.hb_fill.scale_x = 1.5 * r
-        self.hb_fill.x = -1.5 * (1 - r) / 2
+        self.hb_fill.scale_x = self._hb_full_w * r
         if not self.is_player:
             self.hb_fill.color = (color.lime   if r > 0.6 else
                                   color.orange  if r > 0.3 else color.red)
